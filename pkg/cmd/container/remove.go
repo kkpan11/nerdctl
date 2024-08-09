@@ -25,10 +25,10 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/namespaces"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
@@ -132,6 +132,14 @@ func RemoveContainer(ctx context.Context, c containerd.Container, globalOptions 
 	if err != nil {
 		return err
 	}
+	// Note: technically, it is not strictly necessary to acquire an exclusive lock on the volume store here.
+	// Worst case scenario, we would fail removing anonymous volumes later on, which is a soft error, and which would
+	// only happen if we concurrently tried to remove the same container.
+	err = volStore.Lock()
+	if err != nil {
+		return err
+	}
+	defer volStore.Unlock()
 	// Decode IPC
 	ipc, err := ipcutil.DecodeIPCLabel(containerLabels[labels.IPC])
 	if err != nil {
@@ -266,8 +274,17 @@ func RemoveContainer(ctx context.Context, c containerd.Container, globalOptions 
 		if err == nil {
 			<-es
 		}
-	case containerd.Created, containerd.Stopped:
-		// Created and stopped containers always get removed
+	case containerd.Created:
+		// TODO(Iceber): Since `containerd.WithProcessKill` blocks the killing of tasks with PID 0,
+		// remove the judgment and break when it is compatible with the tasks.
+		if task.Pid() == 0 {
+			// Created tasks with PID 0 always get removed
+			// Delete the task, without forcing kill
+			_, err = task.Delete(ctx)
+			return err
+		}
+	case containerd.Stopped:
+		// Stopped containers always get removed
 		// Delete the task, without forcing kill
 		_, err = task.Delete(ctx)
 		return err

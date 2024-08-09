@@ -23,15 +23,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"text/template"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/snapshots"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/containerdutil"
@@ -108,6 +109,10 @@ func List(ctx context.Context, client *containerd.Client, filters, nameAndRefFil
 
 		imageList = imgutil.FilterImages(imageList, beforeImages, sinceImages)
 	}
+
+	sort.Slice(imageList, func(i, j int) bool {
+		return imageList[i].CreatedAt.After(imageList[j].CreatedAt)
+	})
 	return imageList, nil
 }
 

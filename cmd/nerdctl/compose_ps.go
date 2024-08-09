@@ -23,9 +23,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/runtime/restart"
+	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
+
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/runtime/restart"
+	"github.com/containerd/errdefs"
 	gocni "github.com/containerd/go-cni"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
@@ -34,8 +37,6 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/formatter"
 	"github.com/containerd/nerdctl/v2/pkg/labels"
 	"github.com/containerd/nerdctl/v2/pkg/portutil"
-	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 func newComposePsCommand() *cobra.Command {

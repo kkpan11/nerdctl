@@ -330,7 +330,7 @@ func TestRunWithJournaldLogDriver(t *testing.T) {
 	found := 0
 	check := func(log poll.LogT) poll.Result {
 		res := icmd.RunCmd(icmd.Command(journalctl, "--no-pager", "--since", "2 minutes ago", fmt.Sprintf("SYSLOG_IDENTIFIER=%s", inspectedContainer.ID[:12])))
-		assert.Equal(t, 0, res.ExitCode, res.Combined())
+		assert.Equal(t, 0, res.ExitCode, res)
 		if strings.Contains(res.Stdout(), "bar") && strings.Contains(res.Stdout(), "foo") {
 			found = 1
 			return poll.Success()
@@ -359,7 +359,7 @@ func TestRunWithJournaldLogDriverAndLogOpt(t *testing.T) {
 	found := 0
 	check := func(log poll.LogT) poll.Result {
 		res := icmd.RunCmd(icmd.Command(journalctl, "--no-pager", "--since", "2 minutes ago", fmt.Sprintf("SYSLOG_IDENTIFIER=%s", inspectedContainer.ID)))
-		assert.Equal(t, 0, res.ExitCode, res.Combined())
+		assert.Equal(t, 0, res.ExitCode, res)
 		if strings.Contains(res.Stdout(), "bar") && strings.Contains(res.Stdout(), "foo") {
 			found = 1
 			return poll.Success()
@@ -398,7 +398,7 @@ RUN echo '\
 	"path/filepath" \n\
 	"sync" \n\
 	\n\
-	"github.com/containerd/containerd/runtime/v2/logging"\n\
+	"github.com/containerd/containerd/v2/core/runtime/v2/logging"\n\
 	)\n\
 
 	func main() {\n\
@@ -531,5 +531,125 @@ func TestRunRmTime(t *testing.T) {
 	const deadline = 3 * time.Second
 	if took > deadline {
 		t.Fatalf("expected to have completed in %v, took %v", deadline, took)
+	}
+}
+
+func runAttachStdin(t *testing.T, testStr string, args []string) string {
+	if runtime.GOOS == "windows" {
+		t.Skip("run attach test is not yet implemented on Windows")
+	}
+
+	t.Parallel()
+	base := testutil.NewBase(t)
+	containerName := testutil.Identifier(t)
+
+	opts := []func(*testutil.Cmd){
+		testutil.WithStdin(strings.NewReader("echo " + testStr + "\nexit\n")),
+	}
+
+	fullArgs := []string{"run", "--rm", "-i"}
+	fullArgs = append(fullArgs, args...)
+	fullArgs = append(fullArgs,
+		"--name",
+		containerName,
+		testutil.CommonImage,
+	)
+
+	defer base.Cmd("rm", "-f", containerName).AssertOK()
+	result := base.Cmd(fullArgs...).CmdOption(opts...).Run()
+
+	return result.Combined()
+}
+
+func runAttach(t *testing.T, testStr string, args []string) string {
+	if runtime.GOOS == "windows" {
+		t.Skip("run attach test is not yet implemented on Windows")
+	}
+
+	t.Parallel()
+	base := testutil.NewBase(t)
+	containerName := testutil.Identifier(t)
+
+	fullArgs := []string{"run"}
+	fullArgs = append(fullArgs, args...)
+	fullArgs = append(fullArgs,
+		"--name",
+		containerName,
+		testutil.CommonImage,
+		"sh",
+		"-euxc",
+		"echo "+testStr,
+	)
+
+	defer base.Cmd("rm", "-f", containerName).AssertOK()
+	result := base.Cmd(fullArgs...).Run()
+
+	return result.Combined()
+}
+
+func TestRunAttachFlag(t *testing.T) {
+
+	type testCase struct {
+		name        string
+		args        []string
+		testFunc    func(t *testing.T, testStr string, args []string) string
+		testStr     string
+		expectedOut string
+		dockerOut   string
+	}
+	testCases := []testCase{
+		{
+			name:        "AttachFlagStdin",
+			args:        []string{"-a", "STDIN", "-a", "STDOUT"},
+			testFunc:    runAttachStdin,
+			testStr:     "test-run-stdio",
+			expectedOut: "test-run-stdio",
+			dockerOut:   "test-run-stdio",
+		},
+		{
+			name:        "AttachFlagStdOut",
+			args:        []string{"-a", "STDOUT"},
+			testFunc:    runAttach,
+			testStr:     "foo",
+			expectedOut: "foo",
+			dockerOut:   "foo",
+		},
+		{
+			name:        "AttachFlagMixedValue",
+			args:        []string{"-a", "STDIN", "-a", "invalid-value"},
+			testFunc:    runAttach,
+			testStr:     "foo",
+			expectedOut: "invalid stream specified with -a flag. Valid streams are STDIN, STDOUT, and STDERR",
+			dockerOut:   "valid streams are STDIN, STDOUT and STDERR",
+		},
+		{
+			name:        "AttachFlagInvalidValue",
+			args:        []string{"-a", "invalid-stream"},
+			testFunc:    runAttach,
+			testStr:     "foo",
+			expectedOut: "invalid stream specified with -a flag. Valid streams are STDIN, STDOUT, and STDERR",
+			dockerOut:   "valid streams are STDIN, STDOUT and STDERR",
+		},
+		{
+			name:        "AttachFlagCaseInsensitive",
+			args:        []string{"-a", "stdin", "-a", "stdout"},
+			testFunc:    runAttachStdin,
+			testStr:     "test-run-stdio",
+			expectedOut: "test-run-stdio",
+			dockerOut:   "test-run-stdio",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			actualOut := tc.testFunc(t, tc.testStr, tc.args)
+			errorMsg := fmt.Sprintf("%s failed;\nExpected: '%s'\nActual: '%s'", tc.name, tc.expectedOut, actualOut)
+			if testutil.GetTarget() == testutil.Docker {
+				assert.Equal(t, true, strings.Contains(actualOut, tc.dockerOut), errorMsg)
+			} else {
+				assert.Equal(t, true, strings.Contains(actualOut, tc.expectedOut), errorMsg)
+			}
+		})
 	}
 }

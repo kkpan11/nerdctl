@@ -17,17 +17,15 @@
 package mountutil
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/identifiers"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/pkg/userns"
+	"github.com/containerd/containerd/v2/pkg/identifiers"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/containerd/v2/pkg/userns"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/idgen"
 	"github.com/containerd/nerdctl/v2/pkg/mountutil/volumestore"
@@ -169,7 +167,6 @@ func handleBindMounts(source string, createDir bool) (volumeSpec, error) {
 
 	// Handle relative paths
 	if !filepath.IsAbs(source) {
-		log.L.Warnf("expected an absolute path, got a relative path %q (allowed for nerdctl, but disallowed for Docker, so unrecommended)", source)
 		absPath, err := filepath.Abs(source)
 		if err != nil {
 			return res, fmt.Errorf("failed to get the absolute path of %q: %w", source, err)
@@ -203,16 +200,11 @@ func handleAnonymousVolumes(s string, volStore volumestore.VolumeStore) (volumeS
 func handleNamedVolumes(source string, volStore volumestore.VolumeStore) (volumeSpec, error) {
 	var res volumeSpec
 	res.Name = source
-	vol, err := volStore.Get(res.Name, false)
+
+	// Create returns an existing volume or creates a new one if necessary.
+	vol, err := volStore.Create(res.Name, nil)
 	if err != nil {
-		if errors.Is(err, errdefs.ErrNotFound) {
-			vol, err = volStore.Create(res.Name, nil)
-			if err != nil {
-				return res, fmt.Errorf("failed to create volume %q: %w", res.Name, err)
-			}
-		} else {
-			return res, fmt.Errorf("failed to get volume %q: %w", res.Name, err)
-		}
+		return res, fmt.Errorf("failed to get volume %q: %w", res.Name, err)
 	}
 	// src is now an absolute path
 	res.Type = Volume

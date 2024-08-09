@@ -24,10 +24,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/pkg/progress"
-	"github.com/containerd/containerd/snapshots"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/progress"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/containerdutil"
@@ -62,13 +62,15 @@ func filterContainers(ctx context.Context, client *containerd.Client, filters []
 		return nil, err
 	}
 	containers = filterCtx.MatchesFilters(ctx)
+
+	sort.Slice(containers, func(i, j int) bool {
+		infoI, _ := containers[i].Info(ctx, containerd.WithoutRefreshedMetadata)
+		infoJ, _ := containers[j].Info(ctx, containerd.WithoutRefreshedMetadata)
+		return infoI.CreatedAt.After(infoJ.CreatedAt)
+	})
+
 	if lastN > 0 {
 		all = true
-		sort.Slice(containers, func(i, j int) bool {
-			infoI, _ := containers[i].Info(ctx, containerd.WithoutRefreshedMetadata)
-			infoJ, _ := containers[j].Info(ctx, containerd.WithoutRefreshedMetadata)
-			return infoI.CreatedAt.After(infoJ.CreatedAt)
-		})
 		if lastN < len(containers) {
 			containers = containers[:lastN]
 		}

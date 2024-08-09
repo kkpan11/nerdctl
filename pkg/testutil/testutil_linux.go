@@ -34,7 +34,8 @@ var (
 	AlpineImage                 = mirrorOf("alpine:3.13")
 	NginxAlpineImage            = mirrorOf("nginx:1.19-alpine")
 	NginxAlpineIndexHTMLSnippet = "<title>Welcome to nginx!</title>"
-	RegistryImage               = mirrorOf("registry:2")
+	RegistryImageStable         = mirrorOf("registry:2")
+	RegistryImageNext           = "ghcr.io/distribution/distribution:"
 	WordpressImage              = mirrorOf("wordpress:5.7")
 	WordpressIndexHTMLSnippet   = "<title>WordPress &rsaquo; Installation</title>"
 	MariaDBImage                = mirrorOf("mariadb:10.5")
@@ -124,7 +125,8 @@ func NewDelayOnceReader(wrapped io.Reader) io.Reader {
 }
 
 func (r *delayOnceReader) Read(p []byte) (int, error) {
-	r.once.Do(func() { time.Sleep(time.Second) })
+	// FIXME: this is obviously not exact science. At 1 second, it will fail regularly on the CI under load.
+	r.once.Do(func() { time.Sleep(2 * time.Second) })
 	n, err := r.wrapped.Read(p)
 	if errors.Is(err, io.EOF) {
 		time.Sleep(time.Second)

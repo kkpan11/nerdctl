@@ -17,9 +17,10 @@
 package main
 
 import (
+	"github.com/spf13/cobra"
+
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/volume"
-	"github.com/spf13/cobra"
 )
 
 func newVolumeInspectCommand() *cobra.Command {
@@ -66,7 +67,7 @@ func volumeInspectAction(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return volume.Inspect(args, options)
+	return volume.Inspect(cmd.Context(), args, options)
 }
 
 func volumeInspectShellComplete(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {

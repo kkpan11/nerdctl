@@ -22,8 +22,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/errdefs"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"
@@ -32,53 +32,68 @@ import (
 )
 
 func Remove(ctx context.Context, client *containerd.Client, volumes []string, options types.VolumeRemoveOptions) error {
-	containers, err := client.Containers(ctx)
-	if err != nil {
-		return err
-	}
+	// Get the volume store and lock it until we are done.
+	// This will prevent racing new containers from being created or removed until we are done with the cleanup of volumes
 	volStore, err := Store(options.GOptions.Namespace, options.GOptions.DataRoot, options.GOptions.Address)
 	if err != nil {
 		return err
 	}
-	usedVolumes, err := usedVolumes(ctx, containers)
+	err = volStore.Lock()
+	if err != nil {
+		return err
+	}
+	defer volStore.Unlock()
+
+	// Get containers and see which volumes are used
+	containers, err := client.Containers(ctx)
 	if err != nil {
 		return err
 	}
 
-	var volumenames []string // nolint: prealloc
-	for _, name := range volumes {
-		if _, ok := usedVolumes[name]; ok {
-			return fmt.Errorf("volume %q is in use", name)
-		}
-		volumenames = append(volumenames, name)
-	}
-	// if err is set, this is a hard filesystem error
-	removedNames, warns, err := volStore.Remove(volumenames)
+	usedVolumesList, err := usedVolumes(ctx, containers)
 	if err != nil {
 		return err
 	}
+
+	volumeNames := []string{}
+	cannotRemove := []error{}
+
+	for _, name := range volumes {
+		if _, ok := usedVolumesList[name]; ok {
+			cannotRemove = append(cannotRemove, fmt.Errorf("volume %q is in use (%w)", name, errdefs.ErrFailedPrecondition))
+			continue
+		}
+		volumeNames = append(volumeNames, name)
+	}
+	// if err is set, this is a hard filesystem error
+	removedNames, warns, err := volStore.Remove(volumeNames)
+	if err != nil {
+		return err
+	}
+	cannotRemove = append(cannotRemove, warns...)
 	// Otherwise, output on stdout whatever was successful
 	for _, name := range removedNames {
 		fmt.Fprintln(options.Stdout, name)
 	}
 	// Log the rest
-	for _, volErr := range warns {
+	for _, volErr := range cannotRemove {
 		log.G(ctx).Warn(volErr)
 	}
-	if len(warns) > 0 {
+	if len(cannotRemove) > 0 {
 		return errors.New("some volumes could not be removed")
 	}
 	return nil
 }
 
 func usedVolumes(ctx context.Context, containers []containerd.Container) (map[string]struct{}, error) {
-	usedVolumes := make(map[string]struct{})
+	usedVolumesList := make(map[string]struct{})
 	for _, c := range containers {
 		l, err := c.Labels(ctx)
 		if err != nil {
 			// Containerd note: there is no guarantee that the containers we got from the list still exist at this point
 			// If that is the case, just ignore and move on
 			if errors.Is(err, errdefs.ErrNotFound) {
+				log.G(ctx).Debugf("container %q is gone - ignoring", c.ID())
 				continue
 			}
 			return nil, err
@@ -95,9 +110,9 @@ func usedVolumes(ctx context.Context, containers []containerd.Container) (map[st
 		}
 		for _, m := range mounts {
 			if m.Type == mountutil.Volume {
-				usedVolumes[m.Name] = struct{}{}
+				usedVolumesList[m.Name] = struct{}{}
 			}
 		}
 	}
-	return usedVolumes, nil
+	return usedVolumesList, nil
 }

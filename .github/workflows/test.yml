@@ -26,12 +26,14 @@ jobs:
           check-latest: true
           cache: true
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6.0.1
+        uses: golangci/golangci-lint-action@v6.1.0
         with:
           version: v1.59.1
           args: --verbose
       - name: yamllint-lint
-        run: yamllint .
+        run: make lint-yaml
+      - name: shellcheck
+        run: make lint-shell
 
   test-unit:
     runs-on: ubuntu-24.04
@@ -58,16 +60,10 @@ jobs:
         include:
           - ubuntu: 20.04
             containerd: v1.6.33
-          - ubuntu: 20.04
-            containerd: v1.7.19
           - ubuntu: 22.04
             containerd: v1.7.19
-          - ubuntu: 22.04
-            containerd: main  # v2.0.0-rc.X
           - ubuntu: 24.04
-            containerd: v1.7.19
-          - ubuntu: 24.04
-            containerd: main  # v2.0.0-rc.X
+            containerd: v2.0.0-rc.3
     env:
       UBUNTU_VERSION: "${{ matrix.ubuntu }}"
       CONTAINERD_VERSION: "${{ matrix.containerd }}"
@@ -76,7 +72,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: "Prepare integration test environment"
-        run: DOCKER_BUILDKIT=1 docker build -t test-integration --target test-integration --build-arg UBUNTU_VERSION=${UBUNTU_VERSION} --build-arg CONTAINERD_VERSION=${CONTAINERD_VERSION} .
+        run: docker build -t test-integration --target test-integration --build-arg UBUNTU_VERSION=${UBUNTU_VERSION} --build-arg CONTAINERD_VERSION=${CONTAINERD_VERSION} .
       - name: "Remove snap loopback devices (conflicts with our loopback devices in TestRunDevice)"
         run: |
           sudo systemctl disable --now snapd.service snapd.socket
@@ -120,7 +116,7 @@ jobs:
           echo '{"ipv6": true, "fixed-cidr-v6": "2001:db8:1::/64", "experimental": true, "ip6tables": true}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
       - name: "Prepare integration test environment"
-        run: DOCKER_BUILDKIT=1 docker build -t test-integration-ipv6 --target test-integration-ipv6 --build-arg UBUNTU_VERSION=${UBUNTU_VERSION} --build-arg CONTAINERD_VERSION=${CONTAINERD_VERSION} .
+        run: docker build -t test-integration-ipv6 --target test-integration-ipv6 --build-arg UBUNTU_VERSION=${UBUNTU_VERSION} --build-arg CONTAINERD_VERSION=${CONTAINERD_VERSION} .
       - name: "Remove snap loopback devices (conflicts with our loopback devices in TestRunDevice)"
         run: |
           sudo systemctl disable --now snapd.service snapd.socket
@@ -152,42 +148,18 @@ jobs:
         include:
           - ubuntu: 20.04
             containerd: v1.6.33
-            rootlesskit: v1.1.1
-            target: test-integration-rootless
-          - ubuntu: 20.04
-            containerd: v1.7.19
-            rootlesskit: v2.1.0
+            rootlesskit: v1.1.1  # Deprecated
             target: test-integration-rootless
           - ubuntu: 22.04
             containerd: v1.7.19
-            rootlesskit: v1.1.1
+            rootlesskit: v2.1.0
             target: test-integration-rootless
-          - ubuntu: 22.04
-            containerd: main  # v2.0.0-rc.X
+          - ubuntu: 24.04
+            containerd: v2.0.0-rc.3
             rootlesskit: v2.1.0
             target: test-integration-rootless
           - ubuntu: 24.04
             containerd: v1.7.19
-            rootlesskit: v1.1.1
-            target: test-integration-rootless
-          - ubuntu: 24.04
-            containerd: main  # v2.0.0-rc.X
-            rootlesskit: v2.1.0
-            target: test-integration-rootless
-          - ubuntu: 20.04
-            containerd: v1.6.33
-            rootlesskit: v1.1.1
-            target: test-integration-rootless-port-slirp4netns
-          - ubuntu: 20.04
-            containerd: v1.7.19
-            rootlesskit: v2.1.0
-            target: test-integration-rootless-port-slirp4netns
-          - ubuntu: 24.04
-            containerd: v1.7.19
-            rootlesskit: v1.1.1
-            target: test-integration-rootless-port-slirp4netns
-          - ubuntu: 24.04
-            containerd: main  # v2.0.0-rc.X
             rootlesskit: v2.1.0
             target: test-integration-rootless-port-slirp4netns
     env:
@@ -217,14 +189,22 @@ jobs:
       - name: "Register QEMU (tonistiigi/binfmt)"
         run: docker run --privileged --rm tonistiigi/binfmt --install all
       - name: "Prepare (network driver=slirp4netns, port driver=builtin)"
-        run: DOCKER_BUILDKIT=1 docker build -t ${TEST_TARGET} --target ${TEST_TARGET} --build-arg UBUNTU_VERSION=${UBUNTU_VERSION} --build-arg CONTAINERD_VERSION=${CONTAINERD_VERSION} --build-arg ROOTLESSKIT_VERSION=${ROOTLESSKIT_VERSION} .
+        run: docker build -t ${TEST_TARGET} --target ${TEST_TARGET} --build-arg UBUNTU_VERSION=${UBUNTU_VERSION} --build-arg CONTAINERD_VERSION=${CONTAINERD_VERSION} --build-arg ROOTLESSKIT_VERSION=${ROOTLESSKIT_VERSION} .
+      - name: "Disable BuildKit for RootlessKit v1 (workaround for issue #622)"
+        run: |
+          # https://github.com/containerd/nerdctl/issues/622
+          WORKAROUND_ISSUE_622=
+          if echo "${ROOTLESSKIT_VERSION}" | grep -q v1; then
+            WORKAROUND_ISSUE_622=1
+          fi
+          echo "WORKAROUND_ISSUE_622=${WORKAROUND_ISSUE_622}" >>$GITHUB_ENV
       - name: "Test (network driver=slirp4netns, port driver=builtin)"
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 30
           max_attempts: 2
           retry_on: error
-          command: docker run -t --rm --privileged -e WORKAROUND_ISSUE_622=1 ${TEST_TARGET}
+          command: docker run -t --rm --privileged -e WORKAROUND_ISSUE_622=${WORKAROUND_ISSUE_622} ${TEST_TARGET}
 
   cross:
     runs-on: ubuntu-24.04
@@ -245,7 +225,7 @@ jobs:
         run: GO_VERSION="$(echo ${{ matrix.go-version }} | sed -e s/.x//)" make binaries
 
   test-integration-docker-compatibility:
-    runs-on: ubuntu-22.04  # TODO: ubuntu-24.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4.1.7

@@ -29,11 +29,11 @@ import (
 	"time"
 
 	"github.com/containerd/console"
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/runtime/restart"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/runtime/restart"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/consoleutil"
 	"github.com/containerd/nerdctl/v2/pkg/errutil"
@@ -272,7 +272,13 @@ func Start(ctx context.Context, container containerd.Container, flagA bool, clie
 		}
 	}
 	detachC := make(chan struct{})
-	task, err := taskutil.NewTask(ctx, client, container, flagA, false, flagT, true, con, logURI, detachKeys, namespace, detachC)
+	attachStreamOpt := []string{}
+	if flagA {
+		// In start, flagA attaches only STDOUT/STDERR
+		// source: https://github.com/containerd/nerdctl/blob/main/docs/command-reference.md#whale-nerdctl-start
+		attachStreamOpt = []string{"STDOUT", "STDERR"}
+	}
+	task, err := taskutil.NewTask(ctx, client, container, attachStreamOpt, false, flagT, true, con, logURI, detachKeys, namespace, detachC)
 	if err != nil {
 		return err
 	}

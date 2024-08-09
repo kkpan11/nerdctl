@@ -21,11 +21,11 @@ import (
 	"io"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/login"
-
-	"github.com/spf13/cobra"
 )
 
 func newLoginCommand() *cobra.Command {
@@ -60,6 +60,10 @@ func processLoginOptions(cmd *cobra.Command) (types.LoginCommandOptions, error) 
 	passwordStdin, err := cmd.Flags().GetBool("password-stdin")
 	if err != nil {
 		return types.LoginCommandOptions{}, err
+	}
+
+	if strings.Contains(username, ":") {
+		return types.LoginCommandOptions{}, errors.New("username cannot contain colons")
 	}
 
 	if password != "" {

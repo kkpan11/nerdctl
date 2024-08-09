@@ -17,10 +17,13 @@
 package main
 
 import (
-	"github.com/containerd/nerdctl/v2/pkg/api/types"
-	"github.com/containerd/nerdctl/v2/pkg/cmd/volume"
+	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/containerd/errdefs"
+	"github.com/containerd/nerdctl/v2/pkg/api/types"
+	"github.com/containerd/nerdctl/v2/pkg/cmd/volume"
 )
 
 func newVolumeCreateCommand() *cobra.Command {
@@ -45,6 +48,12 @@ func processVolumeCreateOptions(cmd *cobra.Command) (types.VolumeCreateOptions, 
 	if err != nil {
 		return types.VolumeCreateOptions{}, err
 	}
+	for _, label := range labels {
+		if label == "" {
+			return types.VolumeCreateOptions{}, fmt.Errorf("labels cannot be empty (%w)", errdefs.ErrInvalidArgument)
+		}
+	}
+
 	return types.VolumeCreateOptions{
 		GOptions: globalOptions,
 		Labels:   labels,

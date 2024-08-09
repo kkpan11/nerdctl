@@ -29,16 +29,17 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/oci"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	gocni "github.com/containerd/go-cni"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/annotations"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/image"
+	"github.com/containerd/nerdctl/v2/pkg/cmd/volume"
 	"github.com/containerd/nerdctl/v2/pkg/containerutil"
 	"github.com/containerd/nerdctl/v2/pkg/flagutil"
 	"github.com/containerd/nerdctl/v2/pkg/idgen"
@@ -61,6 +62,17 @@ import (
 
 // Create will create a container.
 func Create(ctx context.Context, client *containerd.Client, args []string, netManager containerutil.NetworkOptionsManager, options types.ContainerCreateOptions) (containerd.Container, func(), error) {
+	// Acquire an exclusive lock on the volume store until we are done to avoid being raced by other volume operations
+	volStore, err := volume.Store(options.GOptions.Namespace, options.GOptions.DataRoot, options.GOptions.Address)
+	if err != nil {
+		return nil, nil, err
+	}
+	err = volStore.Lock()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer volStore.Unlock()
+
 	// simulate the behavior of double dash
 	newArg := []string{}
 	if len(args) >= 2 && args[1] == "--" {
@@ -118,7 +130,12 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 		}
 		rawRef := args[0]
 
-		ensuredImage, err = image.EnsureImage(ctx, client, rawRef, ocispecPlatforms, options.Pull, nil, false, options.ImagePullOpt)
+		options.ImagePullOpt.Mode = options.Pull
+		options.ImagePullOpt.OCISpecPlatform = ocispecPlatforms
+		options.ImagePullOpt.Unpack = nil
+		options.ImagePullOpt.Quiet = false
+
+		ensuredImage, err = image.EnsureImage(ctx, client, rawRef, options.ImagePullOpt)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -151,7 +168,7 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 	}
 
 	var mountOpts []oci.SpecOpts
-	mountOpts, internalLabels.anonVolumes, internalLabels.mountPoints, err = generateMountOpts(ctx, client, ensuredImage, options)
+	mountOpts, internalLabels.anonVolumes, internalLabels.mountPoints, err = generateMountOpts(ctx, client, ensuredImage, volStore, options)
 	if err != nil {
 		return nil, nil, err
 	}

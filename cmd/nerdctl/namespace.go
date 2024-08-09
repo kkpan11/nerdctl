@@ -23,11 +23,12 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/containerd/containerd/namespaces"
+	"github.com/spf13/cobra"
+
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
 	"github.com/containerd/nerdctl/v2/pkg/mountutil/volumestore"
-	"github.com/spf13/cobra"
 )
 
 func newNamespaceCommand() *cobra.Command {
@@ -113,11 +114,11 @@ func namespaceLsAction(cmd *cobra.Command, args []string) error {
 		}
 		numImages = len(images)
 
-		volStore, err := volumestore.Path(dataStore, ns)
+		volStore, err := volumestore.New(dataStore, ns)
 		if err != nil {
 			log.L.Warn(err)
 		} else {
-			volEnts, err := os.ReadDir(volStore)
+			volEnts, err := volStore.List(false)
 			if err != nil {
 				if !os.IsNotExist(err) {
 					log.L.Warn(err)

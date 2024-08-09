@@ -27,15 +27,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/diff"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/rootfs"
-	"github.com/containerd/containerd/snapshots"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/diff"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/rootfs"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	imgutil "github.com/containerd/nerdctl/v2/pkg/imgutil"
 	"github.com/containerd/nerdctl/v2/pkg/labels"
@@ -169,6 +169,13 @@ func Commit(ctx context.Context, client *containerd.Client, container containerd
 			return emptyDigest, fmt.Errorf("failed to create new image %s: %w", opts.Ref, err)
 		}
 	}
+
+	// unpack the image to snapshotter
+	cimg := containerd.NewImage(client, img)
+	if err := cimg.Unpack(ctx, snName); err != nil {
+		return emptyDigest, err
+	}
+
 	return configDigest, nil
 }
 

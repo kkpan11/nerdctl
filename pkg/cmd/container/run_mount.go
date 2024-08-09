@@ -19,6 +19,7 @@ package container
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,17 +28,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/pkg/userns"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/containerd/v2/pkg/userns"
 	"github.com/containerd/continuity/fs"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
-	"github.com/containerd/nerdctl/v2/pkg/cmd/volume"
 	"github.com/containerd/nerdctl/v2/pkg/idgen"
 	"github.com/containerd/nerdctl/v2/pkg/imgutil"
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"
@@ -122,13 +122,8 @@ func parseMountFlags(volStore volumestore.VolumeStore, options types.ContainerCr
 
 // generateMountOpts generates volume-related mount opts.
 // Other mounts such as procfs mount are not handled here.
-func generateMountOpts(ctx context.Context, client *containerd.Client, ensuredImage *imgutil.EnsuredImage, options types.ContainerCreateOptions) ([]oci.SpecOpts, []string, []*mountutil.Processed, error) {
-	// volume store is corresponds to a directory like `/var/lib/nerdctl/1935db59/volumes/default`
-	volStore, err := volume.Store(options.GOptions.Namespace, options.GOptions.DataRoot, options.GOptions.Address)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
+func generateMountOpts(ctx context.Context, client *containerd.Client, ensuredImage *imgutil.EnsuredImage,
+	volStore volumestore.VolumeStore, options types.ContainerCreateOptions) ([]oci.SpecOpts, []string, []*mountutil.Processed, error) {
 	//nolint:golint,prealloc
 	var (
 		opts        []oci.SpecOpts
@@ -307,6 +302,12 @@ func generateMountOpts(ctx context.Context, client *containerd.Client, ensuredIm
 	for _, c := range containers {
 		ls, err := c.Labels(ctx)
 		if err != nil {
+			// Containerd note: there is no guarantee that the containers we got from the list still exist at this point
+			// If that is the case, just ignore and move on
+			if errors.Is(err, errdefs.ErrNotFound) {
+				log.G(ctx).Debugf("container %q is gone - ignoring", c.ID())
+				continue
+			}
 			return nil, nil, nil, err
 		}
 		_, idMatch := vfSet[c.ID()]

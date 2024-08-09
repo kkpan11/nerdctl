@@ -22,8 +22,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containerd/log"
 	"golang.org/x/sys/unix"
+
+	"github.com/containerd/log"
 )
 
 func WithDirLock(dir string, fn func() error) error {
@@ -32,18 +33,18 @@ func WithDirLock(dir string, fn func() error) error {
 		return err
 	}
 	defer dirFile.Close()
-	if err := Flock(dirFile, unix.LOCK_EX); err != nil {
+	if err := flock(dirFile, unix.LOCK_EX); err != nil {
 		return fmt.Errorf("failed to lock %q: %w", dir, err)
 	}
 	defer func() {
-		if err := Flock(dirFile, unix.LOCK_UN); err != nil {
+		if err := flock(dirFile, unix.LOCK_UN); err != nil {
 			log.L.WithError(err).Errorf("failed to unlock %q", dir)
 		}
 	}()
 	return fn()
 }
 
-func Flock(f *os.File, flags int) error {
+func flock(f *os.File, flags int) error {
 	fd := int(f.Fd())
 	for {
 		err := unix.Flock(fd, flags)
@@ -51,4 +52,28 @@ func Flock(f *os.File, flags int) error {
 			return err
 		}
 	}
+}
+
+func Lock(dir string) (*os.File, error) {
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = flock(dirFile, unix.LOCK_EX); err != nil {
+		return nil, err
+	}
+
+	return dirFile, nil
+}
+
+func Unlock(locked *os.File) error {
+	defer func() {
+		_ = locked.Close()
+	}()
+
+	if err := flock(locked, unix.LOCK_UN); err != nil {
+		return err
+	}
+	return nil
 }
