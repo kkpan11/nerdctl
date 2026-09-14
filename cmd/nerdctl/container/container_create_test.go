@@ -18,6 +18,7 @@ package container
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
@@ -41,29 +43,20 @@ func TestCreate(t *testing.T) {
 		helpers.Anyhow("rm", "-f", data.Identifier("container"))
 	}
 
-	testCase.Require = nerdtest.IsFlaky("https://github.com/containerd/nerdctl/issues/3717")
-
 	testCase.SubTests = []*test.Case{
 		{
 			Description: "ps -a",
 			NoParallel:  true,
-			Command:     test.Command("ps", "-a"),
-			// FIXME: this might get a false positive if other tests have created a container
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("ps", "-a", "--filter", "status=created", "--filter", fmt.Sprintf("name=%s", data.Labels().Get("cID")))
+			},
 			Expected: test.Expects(0, nil, expect.Contains("Created")),
 		},
 		{
 			Description: "start",
 			NoParallel:  true,
 			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-				return helpers.Command("start", data.Labels().Get("cID"))
-			},
-			Expected: test.Expects(0, nil, nil),
-		},
-		{
-			Description: "logs",
-			NoParallel:  true,
-			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-				return helpers.Command("logs", data.Labels().Get("cID"))
+				return helpers.Command("start", "-a", data.Labels().Get("cID"))
 			},
 			Expected: test.Expects(0, nil, expect.Contains("foo")),
 		},
@@ -104,13 +97,13 @@ func TestCreateHyperVContainer(t *testing.T) {
 					helpers.Command("container", "inspect", data.Labels().Get("cID")).
 						Run(&test.Expected{
 							ExitCode: expect.ExitCodeNoCheck,
-							Output: func(stdout string, info string, t *testing.T) {
+							Output: func(stdout string, t tig.T) {
 								var dc []dockercompat.Container
 								err := json.Unmarshal([]byte(stdout), &dc)
 								if err != nil || len(dc) == 0 {
 									return
 								}
-								assert.Equal(t, len(dc), 1, "Unexpectedly got multiple results\n"+info)
+								assert.Equal(t, len(dc), 1, "Unexpectedly got multiple results\n")
 								ran = dc[0].State.Status == "exited"
 							},
 						})

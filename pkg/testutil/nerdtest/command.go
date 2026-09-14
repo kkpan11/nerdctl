@@ -17,63 +17,63 @@
 package nerdtest
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"testing"
+	"strings"
 
 	"gotest.tools/v3/assert"
 
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 	"github.com/containerd/nerdctl/v2/pkg/rootlessutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest/platform"
 )
 
-const defaultNamespace = testutil.Namespace
+const defaultNamespace = "nerdctl-test"
 
 // IMPORTANT note on file writing here:
 // Inside the context of a single test, there is no concurrency, as setup, command and cleanup operate in sequence
 // Furthermore, the tempdir is private by definition.
 // Writing files here in a non-safe manner is thus OK.
-type target = string
-
-const (
-	targetNerdctl = target("nerdctl")
-	targetDocker  = target("docker")
-)
 
 func getTarget() string {
 	// Indirecting to testutil for now
 	return testutil.GetTarget()
 }
 
-func newNerdCommand(conf test.Config, t *testing.T) *nerdCommand {
+func isTargetNerdish() bool {
+	return !strings.HasPrefix(filepath.Base(testutil.GetTarget()), "docker")
+}
+
+func newNerdCommand(conf test.Config, t tig.T) *nerdCommand {
 	// Decide what binary we are running
 	var err error
 	var binary string
 	trgt := getTarget()
-	switch trgt {
-	case targetNerdctl:
-		binary, err = exec.LookPath(trgt)
-		if err != nil {
-			t.Fatalf("unable to find binary %q: %v", trgt, err)
-		}
-		// Set the default namespace if we do not have something already
+
+	binary, err = exec.LookPath(trgt)
+	if err != nil {
+		t.Log(fmt.Sprintf("unable to find binary %q: %v", trgt, err))
+		t.FailNow()
+	}
+
+	if isTargetNerdish() {
+		// Any target but docker is considered a nerdctl variant, either gomodjail, or homegrown cli based on the
+		// nerdctl codebase as a library.
+		// Set the default namespace if we do not have one explicitly set already
 		if conf.Read(Namespace) == "" {
 			conf.Write(Namespace, defaultNamespace)
 		}
-	case targetDocker:
-		binary, err = exec.LookPath(trgt)
-		if err != nil {
-			t.Fatalf("unable to find binary %q: %v", trgt, err)
+	} else {
+		if err = exec.Command(binary, "compose", "version").Run(); err != nil {
+			t.Log(fmt.Sprintf("docker does not support compose: %v", err))
+			t.FailNow()
 		}
-		if err = exec.Command("docker", "compose", "version").Run(); err != nil {
-			t.Fatalf("docker does not support compose: %v", err)
-		}
-	default:
-		t.Fatalf("unknown target %q", getTarget())
 	}
 
 	// Create the base command, with the right binary, t
@@ -104,7 +104,7 @@ type nerdCommand struct {
 func (nc *nerdCommand) Run(expect *test.Expected) {
 	nc.T().Helper()
 	nc.prep()
-	if getTarget() == targetDocker {
+	if !isTargetNerdish() {
 		// We are not in the business of testing docker *error* output, so, spay expectation here
 		if expect != nil {
 			expect.Errors = nil
@@ -130,65 +130,69 @@ func (nc *nerdCommand) prep() {
 	if customDCConfig := nc.GenericCommand.Config.Read(DockerConfig); customDCConfig != "" {
 		if !nc.hasWrittenDockerConfig {
 			dest := filepath.Join(nc.Env["DOCKER_CONFIG"], "config.json")
-			err := os.WriteFile(dest, []byte(customDCConfig), test.FilePermissionsDefault)
+			err := filesystem.WriteFile(dest, []byte(customDCConfig), test.FilePermissionsDefault)
 			assert.NilError(nc.T(), err, "failed to write custom docker config json file for test")
 			nc.hasWrittenDockerConfig = true
 		}
 	}
 
-	if getTarget() == targetDocker {
+	// For Docker, honor log level and return
+	if !isTargetNerdish() {
 		// Allow debugging with docker syntax
 		if nc.Config.Read(Debug) != "" {
 			nc.PrependArgs("--log-level=debug")
 		}
-	} else if getTarget() == targetNerdctl {
-		// Set the namespace
-		if nc.Config.Read(Namespace) != "" {
-			nc.PrependArgs("--namespace=" + string(nc.Config.Read(Namespace)))
+		return
+	}
+
+	// nerd-ish cli get the following additionally.
+
+	// Set the namespace
+	if nc.Config.Read(Namespace) != "" {
+		nc.PrependArgs("--namespace=" + string(nc.Config.Read(Namespace)))
+	}
+
+	if nc.Config.Read(stargz) == enabled {
+		nc.Env["CONTAINERD_SNAPSHOTTER"] = "stargz"
+	}
+
+	if nc.Config.Read(ipfs) == enabled {
+		var ipfsPath string
+		if rootlessutil.IsRootless() {
+			var err error
+			ipfsPath, err = platform.DataHome()
+			ipfsPath = filepath.Join(ipfsPath, "ipfs")
+			assert.NilError(nc.T(), err)
+		} else {
+			ipfsPath = filepath.Join(os.Getenv("HOME"), ".ipfs")
 		}
 
-		if nc.Config.Read(stargz) == enabled {
-			nc.Env["CONTAINERD_SNAPSHOTTER"] = "stargz"
-		}
+		nc.Env["IPFS_PATH"] = ipfsPath
+	}
 
-		if nc.Config.Read(ipfs) == enabled {
-			var ipfsPath string
-			if rootlessutil.IsRootless() {
-				var err error
-				ipfsPath, err = platform.DataHome()
-				ipfsPath = filepath.Join(ipfsPath, "ipfs")
-				assert.NilError(nc.T(), err)
-			} else {
-				ipfsPath = filepath.Join(os.Getenv("HOME"), ".ipfs")
-			}
+	// If no NERDCTL_TOML was explicitly provided, set it to the private dir
+	if nc.Env["NERDCTL_TOML"] == "" {
+		nc.Env["NERDCTL_TOML"] = filepath.Join(nc.GenericCommand.TempDir, "nerdctl.toml")
+	}
 
-			nc.Env["IPFS_PATH"] = ipfsPath
+	// If we have custom toml content, write it if it does not exist already
+	if nc.Config.Read(NerdctlToml) != "" {
+		if !nc.hasWrittenToml {
+			dest := nc.Env["NERDCTL_TOML"]
+			err := filesystem.WriteFile(dest, []byte(nc.Config.Read(NerdctlToml)), test.FilePermissionsDefault)
+			assert.NilError(nc.T(), err, "failed to write NerdctlToml")
+			nc.hasWrittenToml = true
 		}
+	}
 
-		// If no NERDCTL_TOML was explicitly provided, set it to the private dir
-		if nc.Env["NERDCTL_TOML"] == "" {
-			nc.Env["NERDCTL_TOML"] = filepath.Join(nc.GenericCommand.TempDir, "nerdctl.toml")
-		}
-
-		// If we have custom toml content, write it if it does not exist already
-		if nc.Config.Read(NerdctlToml) != "" {
-			if !nc.hasWrittenToml {
-				dest := nc.Env["NERDCTL_TOML"]
-				err := os.WriteFile(dest, []byte(nc.Config.Read(NerdctlToml)), test.FilePermissionsDefault)
-				assert.NilError(nc.T(), err, "failed to write NerdctlToml")
-				nc.hasWrittenToml = true
-			}
-		}
-
-		if nc.Config.Read(HostsDir) != "" {
-			nc.PrependArgs("--hosts-dir=" + string(nc.Config.Read(HostsDir)))
-		}
-		if nc.Config.Read(DataRoot) != "" {
-			nc.PrependArgs("--data-root=" + string(nc.Config.Read(DataRoot)))
-		}
-		if nc.Config.Read(Debug) != "" {
-			nc.PrependArgs("--debug-full")
-		}
+	if nc.Config.Read(HostsDir) != "" {
+		nc.PrependArgs("--hosts-dir=" + string(nc.Config.Read(HostsDir)))
+	}
+	if nc.Config.Read(DataRoot) != "" {
+		nc.PrependArgs("--data-root=" + string(nc.Config.Read(DataRoot)))
+	}
+	if nc.Config.Read(Debug) != "" {
+		nc.PrependArgs("--debug-full")
 	}
 }
 

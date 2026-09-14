@@ -18,9 +18,10 @@ package nerdtest
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
-	"testing"
 	"time"
 
 	"gotest.tools/v3/assert"
@@ -44,7 +45,7 @@ const (
 )
 
 func IsDocker() bool {
-	return testutil.GetTarget() == "docker"
+	return strings.HasPrefix(filepath.Base(testutil.GetTarget()), "docker")
 }
 
 // InspectContainer is a helper that can be used inside custom commands or Setup
@@ -53,7 +54,7 @@ func InspectContainer(helpers test.Helpers, name string) dockercompat.Container 
 	var res dockercompat.Container
 	cmd := helpers.Command("container", "inspect", name)
 	cmd.Run(&test.Expected{
-		Output: expect.JSON([]dockercompat.Container{}, func(dc []dockercompat.Container, _ string, t tig.T) {
+		Output: expect.JSON([]dockercompat.Container{}, func(dc []dockercompat.Container, t tig.T) {
 			assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results")
 			res = dc[0]
 		}),
@@ -66,7 +67,7 @@ func InspectVolume(helpers test.Helpers, name string) native.Volume {
 	var res native.Volume
 	cmd := helpers.Command("volume", "inspect", name)
 	cmd.Run(&test.Expected{
-		Output: expect.JSON([]native.Volume{}, func(dc []native.Volume, _ string, t tig.T) {
+		Output: expect.JSON([]native.Volume{}, func(dc []native.Volume, t tig.T) {
 			assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results")
 			res = dc[0]
 		}),
@@ -79,7 +80,20 @@ func InspectNetwork(helpers test.Helpers, name string) dockercompat.Network {
 	var res dockercompat.Network
 	cmd := helpers.Command("network", "inspect", name)
 	cmd.Run(&test.Expected{
-		Output: expect.JSON([]dockercompat.Network{}, func(dc []dockercompat.Network, _ string, t tig.T) {
+		Output: expect.JSON([]dockercompat.Network{}, func(dc []dockercompat.Network, t tig.T) {
+			assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results")
+			res = dc[0]
+		}),
+	})
+	return res
+}
+
+func InspectNetworkNative(helpers test.Helpers, name string) native.Network {
+	helpers.T().Helper()
+	var res native.Network
+	cmd := helpers.Command("network", "inspect", "--mode", "native", name)
+	cmd.Run(&test.Expected{
+		Output: expect.JSON([]native.Network{}, func(dc []native.Network, t tig.T) {
 			assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results")
 			res = dc[0]
 		}),
@@ -92,7 +106,7 @@ func InspectImage(helpers test.Helpers, name string) dockercompat.Image {
 	var res dockercompat.Image
 	cmd := helpers.Command("image", "inspect", name)
 	cmd.Run(&test.Expected{
-		Output: expect.JSON([]dockercompat.Image{}, func(dc []dockercompat.Image, _ string, t tig.T) {
+		Output: expect.JSON([]dockercompat.Image{}, func(dc []dockercompat.Image, t tig.T) {
 			assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results")
 			res = dc[0]
 		}),
@@ -103,6 +117,14 @@ func InspectImage(helpers test.Helpers, name string) dockercompat.Image {
 const (
 	maxRetry = 20
 	sleep    = time.Second
+	// exitedDeadline is the maximum duration EnsureContainerExited waits for a
+	// container to reach the "exited" (or "dead") state.
+	// Note that this must accommodate containers using a restart policy
+	// (eg: `--restart=on-failure:2`): such containers are reported as
+	// "restarting" (not "exited") until the restart monitor exhausts the retry
+	// count, and the monitor only reconciles every 10 seconds by default
+	// (see https://github.com/containerd/nerdctl/issues/5030).
+	exitedDeadline = 60 * time.Second
 )
 
 func EnsureContainerStarted(helpers test.Helpers, con string) {
@@ -112,13 +134,13 @@ func EnsureContainerStarted(helpers test.Helpers, con string) {
 		helpers.Command("container", "inspect", con).
 			Run(&test.Expected{
 				ExitCode: expect.ExitCodeNoCheck,
-				Output: func(stdout string, info string, t *testing.T) {
+				Output: func(stdout string, t tig.T) {
 					var dc []dockercompat.Container
 					err := json.Unmarshal([]byte(stdout), &dc)
 					if err != nil || len(dc) == 0 {
 						return
 					}
-					assert.Equal(t, len(dc), 1, "Unexpectedly got multiple results\n"+info)
+					assert.Equal(t, len(dc), 1, "Unexpectedly got multiple results\n")
 					started = dc[0].State.Running
 				},
 			})
@@ -132,7 +154,52 @@ func EnsureContainerStarted(helpers test.Helpers, con string) {
 		helpers.T().Log(ins)
 		helpers.T().Log(lgs)
 		helpers.T().Log(ps)
-		helpers.T().Fatalf("container %s still not running after %d retries", con, maxRetry)
+		helpers.T().Log(fmt.Sprintf("container %s still not running after %d retries", con, maxRetry))
+		helpers.T().FailNow()
+	}
+}
+
+func EnsureContainerExited(helpers test.Helpers, con string, exitCode int) {
+	helpers.T().Helper()
+	exited := false
+	deadline := time.Now().Add(exitedDeadline)
+	for time.Now().Before(deadline) && !exited {
+		helpers.Command("container", "inspect", con).
+			Run(&test.Expected{
+				ExitCode: expect.ExitCodeNoCheck,
+				Output: func(stdout string, t tig.T) {
+					var dc []dockercompat.Container
+					err := json.Unmarshal([]byte(stdout), &dc)
+					if err != nil || len(dc) == 0 || (len(dc) > 0 && dc[0].State == nil) {
+						return
+					}
+					assert.Equal(t, len(dc), 1, "Unexpectedly got multiple results\n")
+					state := dc[0].State
+					if state.Running {
+						return
+					}
+					if state.Status != "exited" && state.Status != "dead" {
+						return
+					}
+					// Use a negative exitCode to ignore the exit code and only verify exited/dead state.
+					if exitCode >= 0 && state.ExitCode != exitCode {
+						return
+					}
+					exited = true
+				},
+			})
+		time.Sleep(sleep)
+	}
+
+	if !exited {
+		ins := helpers.Capture("container", "inspect", con)
+		lgs := helpers.Capture("logs", con)
+		ps := helpers.Capture("ps", "-a")
+		helpers.T().Log(ins)
+		helpers.T().Log(lgs)
+		helpers.T().Log(ps)
+		helpers.T().Log(fmt.Sprintf("container %s still not exited after %s", con, exitedDeadline))
+		helpers.T().FailNow()
 	}
 }
 

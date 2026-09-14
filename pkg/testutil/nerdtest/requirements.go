@@ -17,20 +17,33 @@
 package nerdtest
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
+	"github.com/opencontainers/selinux/go-selinux"
 	"gotest.tools/v3/assert"
 
+	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
 
 	"github.com/containerd/nerdctl/v2/pkg/buildkitutil"
+	"github.com/containerd/nerdctl/v2/pkg/clientutil"
+	"github.com/containerd/nerdctl/v2/pkg/containerdutil"
+	ncdefaults "github.com/containerd/nerdctl/v2/pkg/defaults"
+	"github.com/containerd/nerdctl/v2/pkg/infoutil"
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"
+	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/native"
+	"github.com/containerd/nerdctl/v2/pkg/netutil"
 	"github.com/containerd/nerdctl/v2/pkg/rootlessutil"
+	"github.com/containerd/nerdctl/v2/pkg/snapshotterutil"
+	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest/platform"
 )
 
@@ -99,7 +112,7 @@ var IsFlaky = func(issueLink string) *test.Requirement {
 // Generally used as require.Not(nerdtest.Docker), which of course it the opposite
 var Docker = &test.Requirement{
 	Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
-		ret = getTarget() == targetDocker
+		ret = !isTargetNerdish()
 		if ret {
 			mess = "current target is docker"
 		} else {
@@ -109,12 +122,36 @@ var Docker = &test.Requirement{
 	},
 }
 
+// DockerContainerdSnapshotter marks a test as suitable solely for Docker with the containerd
+// image store enabled (the default since Docker v29 on fresh installs).
+// Generally used as require.Not(nerdtest.DockerContainerdSnapshotter).
+var DockerContainerdSnapshotter = &test.Requirement{
+	Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
+		if isTargetNerdish() {
+			return false, "current target is not docker"
+		}
+		stdout := helpers.Capture("info", "--format", "{{ json . }}")
+		// DriverStatus is not part of dockercompat.Info (nerdctl does not implement it)
+		var dinf struct {
+			DriverStatus [][2]string
+		}
+		err := json.Unmarshal([]byte(stdout), &dinf)
+		assert.NilError(helpers.T(), err, "failed to parse docker info")
+		for _, kv := range dinf.DriverStatus {
+			if kv[0] == "driver-type" && kv[1] == "io.containerd.snapshotter.v1" {
+				return true, "docker is using the containerd snapshotter"
+			}
+		}
+		return false, "docker is not using the containerd snapshotter"
+	},
+}
+
 // NerdctlNeedsFixing marks a test as unsuitable to be run for Nerdctl, because of a specific known issue which
 // url must be passed as an argument
 var NerdctlNeedsFixing = func(issueLink string) *test.Requirement {
 	return &test.Requirement{
 		Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
-			ret = getTarget() == targetDocker
+			ret = !isTargetNerdish()
 			if ret {
 				mess = "current target is docker"
 			} else {
@@ -142,7 +179,7 @@ var BrokenTest = func(message string, req *test.Requirement) *test.Requirement {
 var Rootless = &test.Requirement{
 	Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
 		// Make sure we DO not return "IsRootless true" for docker
-		ret = getTarget() == targetNerdctl && rootlessutil.IsRootless()
+		ret = isTargetNerdish() && rootlessutil.IsRootless()
 		if ret {
 			mess = "environment is root-less"
 		} else {
@@ -152,8 +189,95 @@ var Rootless = &test.Requirement{
 	},
 }
 
+// Selinux marks a test as suitable only for the selinux-enabled environment
+var Selinux = &test.Requirement{
+	Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
+		ret = selinux.GetEnabled()
+		if ret {
+			mess = "selinux is enabled"
+		} else {
+			mess = "selinux is disabled"
+		}
+		return ret, mess
+	},
+}
+
+// RootlessWithDetachNetNS marks a test as suitable only for rootless environment with detached netns support.
+var RootlessWithDetachNetNS = &test.Requirement{
+	Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
+		ns, err := rootlessutil.DetachedNetNS()
+		if err != nil {
+			return false, fmt.Sprintf("failed to check for detached netns: %+v", err)
+		}
+		if ns == "" {
+			return false, "detached netns is not supported"
+		}
+		return true, "detached netns is supported"
+	},
+}
+
+// RootlessWithoutDetachNetNS marks a test as suitable only for rootless environment without detached netns support.
+// i.e., RootlessKit v1.
+var RootlessWithoutDetachNetNS = require.All(Rootless, require.Not(RootlessWithDetachNetNS))
+
 // Rootful marks a test as suitable only for rootful env
 var Rootful = require.Not(Rootless)
+
+// ContainerdPlugin requires that the given containerd plugin (and capabilities) is available.
+var ContainerdPlugin = func(requiredType, requiredID string, requiredCaps []string) *test.Requirement {
+	return &test.Requirement{
+		Check: func(data test.Data, helpers test.Helpers) (bool, string) {
+			if IsDocker() {
+				return false, "ContainerdPlugin is not applicable for Docker"
+			}
+			stdout := helpers.Capture("info", "--mode", "native", "--format", "{{ json . }}")
+			var info native.Info
+			if err := json.Unmarshal([]byte(stdout), &info); err != nil {
+				return false, fmt.Sprintf("failed to parse info: %v", err)
+			}
+			if info.Daemon == nil || info.Daemon.Plugins == nil {
+				return false, fmt.Sprintf("test requires containerd plugin %q.%q", requiredType, requiredID)
+			}
+			for _, p := range info.Daemon.Plugins.Plugins {
+				if p.Type != requiredType || p.ID != requiredID {
+					continue
+				}
+				capMap := make(map[string]struct{}, len(p.Capabilities))
+				for _, c := range p.Capabilities {
+					capMap[c] = struct{}{}
+				}
+				for _, c := range requiredCaps {
+					if _, ok := capMap[c]; !ok {
+						return false, fmt.Sprintf("test requires containerd plugin %q.%q with capability %q", requiredType, requiredID, c)
+					}
+				}
+				return true, ""
+			}
+			if len(requiredCaps) == 0 {
+				return false, fmt.Sprintf("test requires containerd plugin %q.%q", requiredType, requiredID)
+			}
+			return false, fmt.Sprintf("test requires containerd plugin %q.%q with capabilities %v", requiredType, requiredID, requiredCaps)
+		},
+	}
+}
+
+// Info requires that `nerdctl info` satisfies the condition function passed as argument.
+func Info(f func(dockercompat.Info) error) *test.Requirement {
+	return &test.Requirement{
+		Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
+			stdout := helpers.Capture("info", "--format", "{{ json . }}")
+			var dinf dockercompat.Info
+			err := json.Unmarshal([]byte(stdout), &dinf)
+			if err != nil {
+				return false, fmt.Sprintf("failed to parse docker info: %v", err)
+			}
+			if err := f(dinf); err != nil {
+				return false, err.Error()
+			}
+			return true, ""
+		},
+	}
+}
 
 // CGroup requires that cgroup is enabled
 var CGroup = &test.Requirement{
@@ -177,7 +301,7 @@ var CgroupsAccessible = require.All(
 	CGroup,
 	&test.Requirement{
 		Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
-			isRootLess := getTarget() == targetNerdctl && rootlessutil.IsRootless()
+			isRootLess := isTargetNerdish() && rootlessutil.IsRootless()
 			if isRootLess {
 				stdout := helpers.Capture("info", "--format", "{{ json . }}")
 				var dinf dockercompat.Info
@@ -271,13 +395,6 @@ var Registry = require.All(
 				// - when we start a large number of registries in subtests, no need to round-trip to ghcr everytime
 				// This of course assumes that the subtests are NOT going to prune / rmi images
 				registryImage := platform.RegistryImageStable
-				up := os.Getenv("DISTRIBUTION_VERSION")
-				if up != "" {
-					if up[0:1] != "v" {
-						up = "v" + up
-					}
-					registryImage = platform.RegistryImageNext + up
-				}
 				helpers.Ensure("pull", "--quiet", registryImage)
 				helpers.Ensure("pull", "--quiet", platform.DockerAuthImage)
 				helpers.Ensure("pull", "--quiet", platform.KuboImage)
@@ -298,8 +415,13 @@ var Build = &test.Requirement{
 		ret := true
 		mess := "buildkitd is enabled"
 
-		if getTarget() == targetNerdctl {
-			bkHostAddr, err := buildkitutil.GetBuildkitHost(defaultNamespace)
+		if isTargetNerdish() {
+			namespace := defaultNamespace
+			if ns := helpers.Read(Namespace); ns != "" {
+				namespace = string(ns)
+			}
+
+			bkHostAddr, err := buildkitutil.GetBuildkitHost(namespace)
 			if err != nil {
 				ret = false
 				mess = fmt.Sprintf("buildkitd is not enabled: %+v", err)
@@ -349,7 +471,7 @@ var Private = &test.Requirement{
 	},
 
 	Cleanup: func(data test.Data, helpers test.Helpers) {
-		if getTarget() == targetNerdctl {
+		if isTargetNerdish() {
 			// FIXME: there are conditions where we still have some stuff in there and this fails...
 			containerList := strings.TrimSpace(helpers.Capture("ps", "-aq"))
 			if containerList != "" {
@@ -359,4 +481,154 @@ var Private = &test.Requirement{
 			helpers.Anyhow("namespace", "remove", data.Labels().Get("_deletenamespace"))
 		}
 	},
+}
+
+// Gomodjail returns whether the binary is packed with gomodjail.
+// https://github.com/AkihiroSuda/gomodjail
+var Gomodjail = &test.Requirement{
+	Check: func(_ test.Data, helpers test.Helpers) (ret bool, mess string) {
+		// FIXME: do not rely on the filename
+		ret = strings.HasSuffix(getTarget(), ".gomodjail")
+		if ret {
+			mess = "current target is packed with gomodjail"
+		} else {
+			mess = "current target is not packed with gomodjail"
+		}
+		return ret, mess
+	},
+}
+
+var AllowModifyUserns = &test.Requirement{
+	Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
+		if testutil.GetAllowModifyUsers() {
+			return true, "allow modify userns is enabled"
+		}
+		return false, "allow modify userns is disabled"
+	},
+}
+
+var RemapIDs = &test.Requirement{
+	Check: func(data test.Data, helpers test.Helpers) (ret bool, mess string) {
+		// Create a cobra command for ProcessRootCmdFlags to get globalOptions
+		ctx := context.Background()
+		snapshotterName := defaults.DefaultSnapshotter
+		namespace := defaultNamespace
+		address := defaults.DefaultAddress
+
+		client, ctx, cancel, err := clientutil.NewClient(ctx, namespace, address)
+		if err != nil {
+			return false, fmt.Sprintf("failed to create client: %v", err)
+		}
+		defer cancel()
+
+		caps, err := client.GetSnapshotterCapabilities(ctx, snapshotterName)
+		if err != nil {
+			return false, fmt.Sprintf("failed to get snapshotter capabilities: %v", err)
+		}
+
+		for _, cap := range caps {
+			if cap == "remap-ids" {
+				return true, "snapshotter supports ID remapping"
+			}
+		}
+		return false, "snapshotter does not support ID remapping"
+	},
+}
+
+// SociVersion returns a requirement that checks if the installed SOCI version
+// meets the minimum required version
+func SociVersion(minVersion string) *test.Requirement {
+	return &test.Requirement{
+		Check: func(data test.Data, helpers test.Helpers) (bool, string) {
+			// Use the common CheckSociVersion function from snapshotterutil
+			err := snapshotterutil.CheckSociVersion(minVersion)
+			if err != nil {
+				return false, err.Error()
+			}
+			return true, fmt.Sprintf("soci version meets minimum requirement %s", minVersion)
+		},
+	}
+}
+
+func ContainerdVersion(v string) *test.Requirement {
+	return &test.Requirement{
+		Check: func(data test.Data, helpers test.Helpers) (bool, string) {
+			ctx := context.Background()
+			namespace := defaultNamespace
+			address := defaults.DefaultAddress
+			client, ctx, cancel, err := clientutil.NewClient(ctx, namespace, address)
+			if err != nil {
+				return false, fmt.Sprintf("failed to create client: %v", err)
+			}
+			defer cancel()
+			if sv, err := containerdutil.ServerSemVer(ctx, client); err != nil {
+				return false, err.Error()
+			} else if sv.LessThan(semver.MustParse(v)) {
+				return false, fmt.Sprintf("`nerdctl commit --compression expects containerd %s or later, got containerd %v", v, sv)
+			}
+			return true, ""
+		},
+	}
+}
+
+// CNIFirewallVersion checks if the CNI firewall plugin version is greater than or equal to the specified version
+func CNIFirewallVersion(requiredVersion string) *test.Requirement {
+	return &test.Requirement{
+		Check: func(data test.Data, helpers test.Helpers) (bool, string) {
+			cniPath := ncdefaults.CNIPath()
+			firewallPath := filepath.Join(cniPath, "firewall")
+			ok, err := netutil.FirewallPluginGEQVersion(firewallPath, requiredVersion)
+			if err != nil {
+				return false, fmt.Sprintf("Failed to check CNI firewall version: %v", err)
+			}
+
+			if !ok {
+				return false, fmt.Sprintf("CNI firewall plugin version is less than required version %s", requiredVersion)
+			}
+
+			return true, fmt.Sprintf("CNI firewall plugin version is greater than or equal to required version %s", requiredVersion)
+		},
+	}
+}
+
+// KernelVersion requires the host kernel version to satisfy the given semver constraint (e.g. ">= 6.0.0-0").
+// If the kernel version cannot be parsed as semver, the requirement is not met.
+func KernelVersion(constraint string) *test.Requirement {
+	return &test.Requirement{
+		Check: func(data test.Data, helpers test.Helpers) (bool, string) {
+			c, err := semver.NewConstraint(constraint)
+			assert.NilError(helpers.T(), err, "invalid kernel version constraint")
+			// EL kernel versions are not semver, so, cleanup first
+			un := strings.Split(infoutil.UnameR(), "-")[0]
+			unameR, err := semver.NewVersion(un)
+			if err != nil {
+				return false, fmt.Sprintf("cannot parse kernel version %q: %v", un, err)
+			}
+			if !c.Check(unameR) {
+				return false, fmt.Sprintf("kernel version %v does not satisfy constraints %v", unameR, c)
+			}
+			return true, fmt.Sprintf("kernel version %v satisfies constraints %v", unameR, c)
+		},
+	}
+}
+
+// SystemService requires the given systemd service (user service when rootless) to be active.
+func SystemService(sv string) *test.Requirement {
+	return &test.Requirement{
+		Check: func(data test.Data, helpers test.Helpers) (bool, string) {
+			if runtime.GOOS != "linux" {
+				return false, fmt.Sprintf("service %q is not supported on %q", sv, runtime.GOOS)
+			}
+			var systemctlArgs []string
+			if rootlessutil.IsRootless() {
+				systemctlArgs = append(systemctlArgs, "--user")
+			}
+			systemctlArgs = append(systemctlArgs, "-q", "is-active", sv)
+			cmd := exec.Command("systemctl", systemctlArgs...)
+			if err := cmd.Run(); err != nil {
+				return false, fmt.Sprintf("service %q does not seem active: %v: %v", sv, cmd.Args, err)
+			}
+			return true, fmt.Sprintf("service %q is active", sv)
+		},
+	}
 }

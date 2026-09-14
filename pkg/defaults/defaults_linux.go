@@ -50,8 +50,9 @@ func CNIPath() string {
 		cni.DefaultCNIDir, // /opt/cni/bin
 		"/usr/local/libexec/cni",
 		"/usr/local/lib/cni",
-		"/usr/libexec/cni", // Fedora
-		"/usr/lib/cni",     // debian (containernetworking-plugins)
+		"/home/linuxbrew/.linuxbrew/opt/cni-plugins/bin", // Homebrew
+		"/usr/libexec/cni",                               // Fedora
+		"/usr/lib/cni",                                   // debian (containernetworking-plugins)
 	}
 	if rootlessutil.IsRootless() {
 		home := os.Getenv("HOME")
@@ -141,4 +142,25 @@ func HostGatewayIP() string {
 		}
 	}
 	return ""
+}
+
+func CDISpecDirs() []string {
+	if !rootlessutil.IsRootless() {
+		return []string{"/etc/cdi", "/var/run/cdi"}
+	}
+	xch, err := rootlessutil.XDGConfigHome()
+	if err != nil {
+		panic(err)
+	}
+	xdr, err := rootlessutil.XDGRuntimeDir()
+	if err != nil {
+		if rootlessutil.IsRootlessChild() {
+			panic(err)
+		}
+		xdr = fmt.Sprintf("/run/user/%d", os.Geteuid())
+	}
+	return []string{
+		filepath.Join(xch, "cdi"),
+		filepath.Join(xdr, "cdi"),
+	}
 }

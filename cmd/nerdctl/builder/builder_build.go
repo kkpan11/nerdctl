@@ -19,11 +19,12 @@ package builder
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/containerd/log"
 
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/completion"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/helpers"
@@ -80,6 +81,7 @@ If Dockerfile is not present and -f is not specified, it will look for Container
 
 	cmd.Flags().String("iidfile", "", "Write the image ID to the file")
 	cmd.Flags().StringArray("label", nil, "Set metadata for an image")
+	cmd.Flags().String("source-policy-file", "", "BuildKit source policy file (see https://github.com/moby/buildkit/blob/master/docs/build-repro.md)")
 
 	return cmd
 }
@@ -208,6 +210,17 @@ func processBuildCommandFlag(cmd *cobra.Command, args []string) (types.BuilderBu
 	if err != nil {
 		return types.BuilderBuildOptions{}, err
 	}
+	sourcePolicyFile, err := cmd.Flags().GetString("source-policy-file")
+	if err != nil {
+		return types.BuilderBuildOptions{}, err
+	}
+
+	usernsRemap, err := cmd.Flags().GetString("userns-remap")
+	if err != nil {
+		return types.BuilderBuildOptions{}, err
+	} else if usernsRemap != "" {
+		log.L.Warn("userns remap is not supported with nerdctl build. dropping the config.")
+	}
 
 	return types.BuilderBuildOptions{
 		GOptions:             globalOptions,
@@ -238,6 +251,7 @@ func processBuildCommandFlag(cmd *cobra.Command, args []string) (types.BuilderBu
 		NetworkMode:          network,
 		ExtendedBuildContext: extendedBuildCtx,
 		ExtraHosts:           extraHosts,
+		SourcePolicyFile:     sourcePolicyFile,
 	}, nil
 }
 
@@ -254,13 +268,6 @@ func GetBuildkitHost(cmd *cobra.Command, namespace string) (string, error) {
 		return buildkitHost, nil
 	}
 
-	if buildkitHost := os.Getenv("BUILDKIT_HOST"); buildkitHost != "" {
-		if err := buildkitutil.PingBKDaemon(buildkitHost); err != nil {
-			return "", err
-		}
-		return buildkitHost, nil
-
-	}
 	return buildkitutil.GetBuildkitHost(namespace)
 }
 

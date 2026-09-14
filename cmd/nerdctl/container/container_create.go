@@ -21,6 +21,7 @@ import (
 	"runtime"
 
 	"github.com/spf13/cobra"
+	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"
 
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/helpers"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
@@ -55,6 +56,7 @@ func CreateCommand() *cobra.Command {
 	return cmd
 }
 
+//revive:disable:function-length
 func createOptions(cmd *cobra.Command) (types.ContainerCreateOptions, error) {
 	var err error
 	opt := types.ContainerCreateOptions{
@@ -215,9 +217,17 @@ func createOptions(cmd *cobra.Command) (types.ContainerCreateOptions, error) {
 	if err != nil {
 		return opt, err
 	}
-	opt.Device, err = cmd.Flags().GetStringSlice("device")
+
+	allDevices, err := cmd.Flags().GetStringSlice("device")
 	if err != nil {
 		return opt, err
+	}
+	for _, device := range allDevices {
+		if cdiparser.IsQualifiedName(device) {
+			opt.CDIDevices = append(opt.CDIDevices, device)
+		} else {
+			opt.Device = append(opt.Device, device)
+		}
 	}
 	// #endregion
 
@@ -244,6 +254,36 @@ func createOptions(cmd *cobra.Command) (types.ContainerCreateOptions, error) {
 	}
 	opt.BlkioDeviceWriteIOps, err = cmd.Flags().GetStringArray("device-write-iops")
 	if err != nil {
+		return opt, err
+	}
+	// #endregion
+
+	// #region for healthcheck flags
+	opt.HealthCmd, err = cmd.Flags().GetString("health-cmd")
+	if err != nil {
+		return opt, err
+	}
+	opt.HealthInterval, err = cmd.Flags().GetDuration("health-interval")
+	if err != nil {
+		return opt, err
+	}
+	opt.HealthTimeout, err = cmd.Flags().GetDuration("health-timeout")
+	if err != nil {
+		return opt, err
+	}
+	opt.HealthRetries, err = cmd.Flags().GetInt("health-retries")
+	if err != nil {
+		return opt, err
+	}
+	opt.HealthStartPeriod, err = cmd.Flags().GetDuration("health-start-period")
+	if err != nil {
+		return opt, err
+	}
+	opt.NoHealthcheck, err = cmd.Flags().GetBool("no-healthcheck")
+	if err != nil {
+		return opt, err
+	}
+	if err := helpers.ValidateHealthcheckFlags(opt); err != nil {
 		return opt, err
 	}
 	// #endregion
@@ -361,7 +401,6 @@ func createOptions(cmd *cobra.Command) (types.ContainerCreateOptions, error) {
 	// #endregion
 
 	// #region for metadata flags
-	opt.NameChanged = cmd.Flags().Changed("name")
 	opt.Name, err = cmd.Flags().GetString("name")
 	if err != nil {
 		return opt, err
@@ -454,6 +493,30 @@ func createOptions(cmd *cobra.Command) (types.ContainerCreateOptions, error) {
 	}
 	// #endregion
 
+	// #region for UserNS
+	opt.UserNS, err = cmd.Flags().GetString("userns-remap")
+	if err != nil {
+		return opt, err
+	}
+
+	userns, err := cmd.Flags().GetString("userns")
+	if err != nil {
+		return opt, err
+	}
+
+	if userns == "host" {
+		opt.UserNS = ""
+	} else if userns != "" {
+		return opt, fmt.Errorf("invalid user mode")
+	}
+
+	if opt.Privileged && opt.UserNS != "" {
+		//userns-remap is not supported with privileged flag.
+		// Ref: https://docs.docker.com/engine/security/userns-remap/
+		return opt, fmt.Errorf("privileged flag cannot be used with userns-remap")
+	}
+	// #endregion
+
 	return opt, nil
 }
 
@@ -472,7 +535,7 @@ func createAction(cmd *cobra.Command, args []string) error {
 	}
 	defer cancel()
 
-	netFlags, err := loadNetworkFlags(cmd)
+	netFlags, err := loadNetworkFlags(cmd, createOpt.GOptions)
 	if err != nil {
 		return fmt.Errorf("failed to load networking flags: %w", err)
 	}
